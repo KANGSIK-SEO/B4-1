@@ -1,81 +1,57 @@
 #!/usr/bin/env bash
-set -u
-
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-if [ -f /etc/profile.d/agent-app.sh ]; then
-  # shellcheck disable=SC1091
-  . /etc/profile.d/agent-app.sh
-fi
+set -euo pipefail
 
 AGENT_LOG_DIR=${AGENT_LOG_DIR:-/var/log/agent-app}
-LOG_FILE=${LOG_FILE:-$AGENT_LOG_DIR/monitor.log}
-START_TIME=
-END_TIME=
+LOG_FILE=${1:-$AGENT_LOG_DIR/monitor.log}
+START_TIME=${2:-}
+END_TIME=${3:-}
 
-usage() {
-  cat <<'USAGE'
-Usage: report.sh [-f LOG_FILE] [-s "YYYY-MM-DD HH:MM:SS"] [-e "YYYY-MM-DD HH:MM:SS"]
-
-Shows CPU/MEM/DISK average, maximum, and minimum from monitor.log.
-USAGE
-}
-
-while getopts ':f:s:e:h' opt; do
-  case "$opt" in
-    f) LOG_FILE=$OPTARG ;;
-    s) START_TIME=$OPTARG ;;
-    e) END_TIME=$OPTARG ;;
-    h) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
-  esac
-done
-
-[ -r "$LOG_FILE" ] || {
-  printf '[ERROR] log file is not readable: %s\n' "$LOG_FILE" >&2
+if [ ! -f "$LOG_FILE" ]; then
+  echo "[ERROR] log file not found: $LOG_FILE"
   exit 1
-}
+fi
 
 awk -v start="$START_TIME" -v end="$END_TIME" '
-  function value_of(name, line, arr, regex) {
-    regex=name ":[0-9.]+%"
-    if (match(line, regex)) {
-      split(substr(line, RSTART, RLENGTH), arr, /[:%]/)
-      return arr[2] + 0
-    }
-    return ""
+function valid_time(ts) {
+  return (start == "" || ts >= start) && (end == "" || ts <= end)
+}
+function update(metric, value, ts) {
+  count[metric]++
+  sum[metric] += value
+  if (!(metric in max) || value > max[metric]) { max[metric] = value; max_ts[metric] = ts }
+  if (!(metric in min) || value < min[metric]) { min[metric] = value; min_ts[metric] = ts }
+}
+{
+  ts = substr($0, 2, 19)
+  if (!valid_time(ts)) next
+  cpu = mem = disk = ""
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^CPU:/) { cpu = $i; sub(/^CPU:/, "", cpu); sub(/%$/, "", cpu) }
+    if ($i ~ /^MEM:/) { mem = $i; sub(/^MEM:/, "", mem); sub(/%$/, "", mem) }
+    if ($i ~ /^DISK_USED:/) { disk = $i; sub(/^DISK_USED:/, "", disk); sub(/%$/, "", disk) }
   }
-
-  function add(metric, value) {
-    count[metric]++
-    sum[metric] += value
-    if (count[metric] == 1 || value > max[metric]) max[metric] = value
-    if (count[metric] == 1 || value < min[metric]) min[metric] = value
+  if (cpu != "" && mem != "" && disk != "") {
+    update("CPU", cpu + 0, ts)
+    update("Memory", mem + 0, ts)
+    update("Disk", disk + 0, ts)
+    samples++
   }
-
-  /^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\]/ {
-    ts=substr($0, 2, 19)
-    if (start != "" && ts < start) next
-    if (end != "" && ts > end) next
-
-    cpu=value_of("CPU", $0)
-    mem=value_of("MEM", $0)
-    disk=value_of("DISK_USED", $0)
-
-    if (cpu != "") add("CPU", cpu)
-    if (mem != "") add("MEM", mem)
-    if (disk != "") add("DISK", disk)
+}
+END {
+  print "====== STATISTICS REPORT ======"
+  if (samples == 0) {
+    print "[Samples]"
+    print "Data Points: 0 samples"
+    exit
   }
-
-  END {
-    if (count["CPU"] == 0) {
-      print "No monitor samples found."
-      exit 1
-    }
-
-    printf "Metric Avg(%%) Max(%%) Min(%%)\n"
-    printf "CPU    %.1f   %.1f   %.1f\n", sum["CPU"]/count["CPU"], max["CPU"], min["CPU"]
-    printf "MEM    %.1f   %.1f   %.1f\n", sum["MEM"]/count["MEM"], max["MEM"], min["MEM"]
-    printf "DISK   %.1f   %.1f   %.1f\n", sum["DISK"]/count["DISK"], max["DISK"], min["DISK"]
+  metrics[1] = "CPU"; metrics[2] = "Memory"; metrics[3] = "Disk"
+  for (i = 1; i <= 3; i++) {
+    m = metrics[i]
+    print "[" m "]"
+    printf "Average : %.1f%%\n", sum[m] / count[m]
+    printf "Maximum : %.1f%% at %s\n", max[m], max_ts[m]
+    printf "Minimum : %.1f%% at %s\n", min[m], min_ts[m]
   }
-' "$LOG_FILE"
+  print "[Samples]"
+  printf "Data Points: %d samples\n", samples
+}' "$LOG_FILE"

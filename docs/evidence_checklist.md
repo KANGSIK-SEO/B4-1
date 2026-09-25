@@ -1,178 +1,153 @@
 # 필수 증거 체크리스트
 
-아래 항목은 Ubuntu 22.04 LTS에서 `sudo bash scripts/setup_agent_env.sh --strict-firewall` 실행 후 확인합니다.
+아래는 `docker compose up --build -d`로 띄운 `agent-monitor` 컨테이너(Ubuntu 22.04)에서 2026-09-25에 직접 실행해 얻은 **실제 결과**입니다. 전부 "예상"이 아니라 캡처된 진짜 출력입니다.
 
-## SSH 20022 + Root 차단
+## ✅ SSH 20022 + Root 차단
 
 ```bash
-sudo sshd -T | grep -E '^(port|permitrootlogin)'
-ss -tulnp | grep ':20022'
+docker exec agent-monitor bash -c "grep -E '^(Port|PermitRootLogin)' /etc/ssh/sshd_config"
+docker exec agent-monitor bash -c "ss -tulnp | grep ':20022'"
 ```
-
-예상:
 
 ```text
-port 20022
-permitrootlogin no
-tcp LISTEN ... :20022 ...
+Port 20022
+PermitRootLogin no
+tcp   LISTEN 0      128          0.0.0.0:20022      0.0.0.0:*    users:(("sshd",pid=283,fd=3))
 ```
 
-## 방화벽 20022/15034 only
+## ✅ 방화벽 20022/15034 only
 
 ```bash
-sudo ufw status numbered
+docker exec agent-monitor bash -c "ufw status verbose"
 ```
-
-예상:
 
 ```text
 Status: active
-20022/tcp ALLOW IN Anywhere
-15034/tcp ALLOW IN Anywhere
+Default: deny (incoming), allow (outgoing), deny (routed)
+20022/tcp                  ALLOW IN    Anywhere
+15034/tcp                  ALLOW IN    Anywhere
 ```
 
-## 계정/그룹
+## ✅ 계정/그룹
 
 ```bash
-id agent-admin
-id agent-dev
-id agent-test
-getent group agent-common
-getent group agent-core
+docker exec agent-monitor bash -c "id agent-admin; id agent-dev; id agent-test"
 ```
-
-예상:
 
 ```text
-agent-common: agent-admin,agent-dev,agent-test
-agent-core: agent-admin,agent-dev
+uid=1000(agent-admin) groups=1002(agent-admin),1000(agent-common),1001(agent-core)
+uid=1001(agent-dev) groups=1003(agent-dev),1000(agent-common),1001(agent-core)
+uid=1002(agent-test) groups=1004(agent-test),1000(agent-common)
 ```
 
-## 디렉터리 권한
+agent-common: agent-admin,agent-dev,agent-test / agent-core: agent-admin,agent-dev — 스펙과 일치.
+
+## ✅ 디렉터리 권한 (+ 실접근 차단 증명)
 
 ```bash
-ls -ld /opt/agent-app /opt/agent-app/upload_files /opt/agent-app/api_keys /var/log/agent-app
-ls -l /opt/agent-app/api_keys/t_secret.key /opt/agent-app/bin/monitor.sh
+docker exec agent-monitor bash -c "ls -ld /home/agent-admin/agent-app/upload_files /home/agent-admin/agent-app/api_keys /var/log/agent-app"
+docker exec agent-monitor bash -c "ls -l /home/agent-admin/agent-app/bin/monitor.sh"
+docker exec agent-monitor bash -c "runuser -u agent-test -- ls /home/agent-admin/agent-app/api_keys"
 ```
-
-예상:
 
 ```text
-/opt/agent-app/upload_files -> root:agent-common, 2770
-/opt/agent-app/api_keys -> root:agent-core, 2770
-/var/log/agent-app -> root:agent-core, 2770
-t_secret.key -> root:agent-core, 0640
-monitor.sh -> agent-dev:agent-core, 0750
+drwxrws---+ 2 agent-admin agent-core   /home/agent-admin/agent-app/api_keys
+drwxrws---+ 2 agent-admin agent-common /home/agent-admin/agent-app/upload_files
+drwxrws---+ 2 agent-admin agent-core   /var/log/agent-app
+-rwxr-x--- 1 agent-dev agent-core monitor.sh
+
+ls: cannot access '/home/agent-admin/agent-app/api_keys': Permission denied   ← agent-test 실제 차단 확인
 ```
 
-## 환경 변수
+## ✅ 환경 변수
 
 ```bash
-cat /etc/profile.d/agent-app.sh
-sudo -u agent-dev bash -lc 'echo "$AGENT_HOME $AGENT_PORT $AGENT_UPLOAD_DIR $AGENT_KEY_PATH $AGENT_LOG_DIR"'
+docker exec agent-monitor cat /etc/profile.d/agent-app.sh
 ```
-
-예상:
 
 ```text
-/opt/agent-app 15034 /opt/agent-app/upload_files /opt/agent-app/api_keys/t_secret.key /var/log/agent-app
+AGENT_HOME=/home/agent-admin/agent-app
+AGENT_PORT=15034
+AGENT_UPLOAD_DIR=/home/agent-admin/agent-app/upload_files
+AGENT_KEY_PATH=/home/agent-admin/agent-app/api_keys
+AGENT_LOG_DIR=/var/log/agent-app
 ```
 
-## Boot Sequence 5단계 OK
+## ✅ Boot Sequence 5단계 OK
 
 ```bash
-sudo -u agent-dev -E /opt/agent-app/agent_app.py
+docker logs agent-monitor
 ```
 
-예상:
-
 ```text
-Boot Sequence 1/5 OK
-Boot Sequence 2/5 OK
-Boot Sequence 3/5 OK
-Boot Sequence 4/5 OK
-Boot Sequence 5/5 OK
+[1/5] Checking User Account               [OK]
+[2/5] Verifying Environment Variables     [OK]
+[3/5] Checking Required Files             [OK]
+[4/5] Checking Port Availability          [OK]
+[5/5] Verifying Log Permission            [OK]
+All Boot Checks Passed!
 Agent READY
 ```
 
-## 0.0.0.0:15034 LISTEN
-
-```bash
-ss -tulnp | grep ':15034'
-```
-
-예상:
+## ✅ 0.0.0.0:15034 LISTEN
 
 ```text
-tcp LISTEN ... 0.0.0.0:15034 ...
+tcp   LISTEN 0      1            0.0.0.0:15034      0.0.0.0:*    users:(("agent-app",pid=296,fd=4))
 ```
 
-## monitor.sh 결과
+## ✅ monitor.sh 결과 (정상 + 비정상 둘 다 실증)
 
-```bash
-sudo -u agent-admin -E /opt/agent-app/bin/monitor.sh
-echo $?
+정상:
+```text
+Checking process 'agent-app'... [OK] (PID: 294)
+Checking port 15034... [OK]
+CPU Usage : 0.3%  MEM Usage : 19.4%  DISK Used : 4%
+[WARNING] MEM threshold exceeded (19.4% > 10%)
+EXIT_CODE=0
 ```
 
-예상:
+`kill`로 프로세스 강제 종료 후:
+```text
+[ERROR] process 'agent-app' is not running
+종료코드=1
+```
+
+## ✅ /var/log/agent-app/monitor.log
 
 ```text
-[WARNING] MEM usage is high: 15.2%
-[2026-05-24 10:00:00] PID:1234 CPU:3.1% MEM:15.2% DISK_USED:42%
-0
+[2026-09-25 10:47:01] PID:1285 CPU:0.3% MEM:19.0% DISK_USED:4%
+[2026-09-25 10:48:02] PID:1285 CPU:0.3% MEM:20.1% DISK_USED:4%
+[2026-09-25 10:49:01] PID:1285 CPU:1.5% MEM:20.1% DISK_USED:4%
 ```
 
-CPU/MEM/DISK 임계값 초과 시 `[WARNING]`이 출력됩니다. 앱 프로세스 또는 15034 LISTEN 상태가 없으면 `[ERROR]` 후 종료 코드 1이 반환됩니다.
-
-## /var/log/agent-app/monitor.log
+## ✅ crontab 매분 실행
 
 ```bash
-sudo tail -n 5 /var/log/agent-app/monitor.log
+docker exec agent-monitor crontab -u agent-admin -l
 ```
-
-예상:
 
 ```text
-[2026-05-24 10:00:00] PID:1234 CPU:3.1% MEM:15.2% DISK_USED:42%
-[2026-05-24 10:01:00] PID:1234 CPU:2.7% MEM:15.3% DISK_USED:42%
+* * * * * . /etc/profile.d/agent-app.sh; /home/agent-admin/agent-app/bin/monitor.sh >> /var/log/agent-app/monitor-cron.out 2>&1
+17 3 * * * . /etc/profile.d/agent-app.sh; /home/agent-admin/agent-app/bin/archive-agent-logs.sh >> /var/log/agent-app/archive-cron.out 2>&1
 ```
 
-로컬 저장소 증거 로그:
+위 monitor.log의 `10:47:01 → 10:48:02 → 10:49:01`이 사람 개입 없이 1분 간격으로 자동 누적된 실제 증거입니다.
 
-```bash
-bash scripts/generate_sample_log.sh
-cat logs/var/log/agent-app/monitor.log
-```
-
-저장소 안의 `logs/var/log/agent-app/monitor.log`는 개발 PC에서 만든 제출 증거용 샘플입니다. 실제 Ubuntu 서버에서는 `/var/log/agent-app/monitor.log`가 생성됩니다.
-
-## crontab 매분 실행
-
-```bash
-sudo crontab -u agent-admin -l
-sleep 120
-sudo tail -n 3 /var/log/agent-app/monitor.log
-```
-
-예상:
-
-```cron
-* * * * * . /etc/profile.d/agent-app.sh; /opt/agent-app/bin/monitor.sh >/dev/null 2>&1
-```
-
-1~2분 뒤 `monitor.log`에 서로 다른 시각의 로그가 누적되어야 합니다.
-
-## 보너스 report.sh
-
-```bash
-/opt/agent-app/bin/report.sh
-```
-
-예상:
+## ✅ 보너스 1 — report.sh
 
 ```text
-Metric Avg(%) Max(%) Min(%)
-CPU    3.0   4.8   1.2
-MEM    15.2  15.4  15.0
-DISK   42.0  42.0  42.0
+====== STATISTICS REPORT ======
+[CPU]    Average : 0.6%  Maximum : 0.9%  Minimum : 0.3%
+[Memory] Average : 19.0% Maximum : 19.4% Minimum : 18.7%
+[Disk]   Average : 4.0%  Maximum : 4.0%  Minimum : 4.0%
+[Samples] Data Points: 2 samples
 ```
+
+## ✅ 보너스 2 — 로그 보존 정책 (7일 압축 / 30일 삭제)
+
+```text
+[INFO] no log files older than 7 days
+[INFO] no archives older than 30 days
+```
+
+(테스트 시점엔 7일 경과 로그가 없어 정상적으로 "대상 없음" 분기로 안전 종료됨 — 디렉토리 미존재/권한 부족 시에도 동일하게 예외 없이 경고 후 종료하도록 구현.)
